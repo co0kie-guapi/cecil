@@ -173,11 +173,31 @@ namespace Mono.Cecil.Cil {
 			var instructions = body.Instructions;
 			var items = instructions.items;
 			var size = instructions.size;
-
+			
+			
+			ByteBuffer byte_buffer = new ByteBuffer ();
+		
 			for (int i = 0; i < size; i++) {
 				var instruction = items [i];
-				WriteOpCode (instruction.opcode);
-				WriteOperand (instruction);
+				WriteOpCode (instruction.opcode,byte_buffer);
+				WriteOperand (instruction,byte_buffer);
+			}
+			
+			bool need_encrypt = false;
+			if (byte_buffer.buffer[0] == 0x00 && byte_buffer.buffer[1] == 0x00) {
+				WriteByte (0xCA);
+				WriteByte (0xFE);
+				need_encrypt = true;
+			}
+			
+			int startIdx = need_encrypt ? 2 : 0;
+			for (int j  = startIdx; j  < byte_buffer.buffer.Length; j ++)
+			{
+				byte byte_to_write  = byte_buffer.buffer[j];
+				if (need_encrypt) {
+					byte_to_write ^= 0x5A; // 加密
+				}
+				WriteByte(byte_to_write);
 			}
 		}
 
@@ -190,6 +210,17 @@ namespace Mono.Cecil.Cil {
 				WriteByte (opcode.Op2);
 			}
 		}
+		
+		void WriteOpCode (OpCode opcode, ByteBuffer byte_buffer)
+		{
+			if (opcode.Size == 1) {
+				byte_buffer.WriteByte (opcode.Op2);
+			} else {
+				byte_buffer.WriteByte (opcode.Op1);
+				byte_buffer.WriteByte (opcode.Op2);
+			}
+		}
+
 
 		void WriteOperand (Instruction instruction)
 		{
@@ -274,6 +305,90 @@ namespace Mono.Cecil.Cil {
 			}
 		}
 
+		
+		void WriteOperand (Instruction instruction, ByteBuffer byte_buffer)
+		{
+			var opcode = instruction.opcode;
+			var operand_type = opcode.OperandType;
+			if (operand_type == OperandType.InlineNone)
+				return;
+
+			var operand = instruction.operand;
+			if (operand == null && !(operand_type == OperandType.InlineBrTarget || operand_type == OperandType.ShortInlineBrTarget)) {
+				throw new ArgumentException ();
+			}
+
+			switch (operand_type) {
+			case OperandType.InlineSwitch: {
+				var targets = (Instruction []) operand;
+				byte_buffer.WriteInt32 (targets.Length);
+				var diff = instruction.Offset + opcode.Size + (4 * (targets.Length + 1));
+				for (int i = 0; i < targets.Length; i++)
+					byte_buffer.WriteInt32 (GetTargetOffset (targets [i]) - diff);
+				break;
+			}
+			case OperandType.ShortInlineBrTarget: {
+				var target = (Instruction) operand;
+				var offset = target != null ? GetTargetOffset (target) : body.code_size;
+				byte_buffer.WriteSByte ((sbyte) (offset - (instruction.Offset + opcode.Size + 1)));
+				break;
+			}
+			case OperandType.InlineBrTarget: {
+				var target = (Instruction) operand;
+				var offset = target != null ? GetTargetOffset (target) : body.code_size;
+				byte_buffer.WriteInt32 (offset - (instruction.Offset + opcode.Size + 4));
+				break;
+			}
+			case OperandType.ShortInlineVar:
+				byte_buffer.WriteByte ((byte) GetVariableIndex ((VariableDefinition) operand));
+				break;
+			case OperandType.ShortInlineArg:
+				byte_buffer.WriteByte ((byte) GetParameterIndex ((ParameterDefinition) operand));
+				break;
+			case OperandType.InlineVar:
+				byte_buffer.WriteInt16 ((short) GetVariableIndex ((VariableDefinition) operand));
+				break;
+			case OperandType.InlineArg:
+				byte_buffer.WriteInt16 ((short) GetParameterIndex ((ParameterDefinition) operand));
+				break;
+			case OperandType.InlineSig:
+				WriteMetadataToken (GetStandAloneSignature ((CallSite) operand));
+				break;
+			case OperandType.ShortInlineI:
+				if (opcode == OpCodes.Ldc_I4_S)
+					byte_buffer.WriteSByte ((sbyte) operand);
+				else
+					byte_buffer.WriteByte ((byte) operand);
+				break;
+			case OperandType.InlineI:
+				byte_buffer.WriteInt32 ((int) operand);
+				break;
+			case OperandType.InlineI8:
+				byte_buffer.WriteInt64 ((long) operand);
+				break;
+			case OperandType.ShortInlineR:
+				byte_buffer.WriteSingle ((float) operand);
+				break;
+			case OperandType.InlineR:
+				byte_buffer.WriteDouble ((double) operand);
+				break;
+			case OperandType.InlineString:
+				WriteMetadataToken (
+					new MetadataToken (
+						TokenType.String,
+						GetUserStringIndex ((string) operand)),byte_buffer);
+				break;
+			case OperandType.InlineType:
+			case OperandType.InlineField:
+			case OperandType.InlineMethod:
+			case OperandType.InlineTok:
+				WriteMetadataToken (metadata.LookupToken ((IMetadataTokenProvider) operand),byte_buffer);
+				break;
+			default:
+				throw new ArgumentException ();
+			}
+		}
+		
 		int GetTargetOffset (Instruction instruction)
 		{
 			if (instruction == null) {
@@ -644,7 +759,12 @@ namespace Mono.Cecil.Cil {
 		{
 			WriteUInt32 (token.ToUInt32 ());
 		}
-
+		
+		void WriteMetadataToken (MetadataToken token,ByteBuffer byte_buffer)
+		{
+			byte_buffer.WriteUInt32 (token.ToUInt32 ());
+		}
+		
 		void Align (int align)
 		{
 			align--;
